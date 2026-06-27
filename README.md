@@ -1,6 +1,6 @@
 # FirstLook SDK for Godot 4
 
-A community-made Godot 4 plugin that lets you integrate [FirstLook.gg](https://firstlook.gg) into your game. FirstLook is a player relationship platform for indie game studios — it handles playtesting, player analytics, in-game surveys, and more.
+A community-made Godot 4 plugin that lets you integrate [FirstLook.gg](https://firstlook.gg) into your game. FirstLook is a player relationship platform for game studios. It handles playtesting, player analytics, in-game surveys, and more.
 
 > **Not official.** This is a community project, not an official FirstLook product. The official SDKs are for [Unreal](https://docs.firstlook.gg/setup/sdk-setup/unreal) and [Unity](https://docs.firstlook.gg/setup/sdk-setup/unity).
 
