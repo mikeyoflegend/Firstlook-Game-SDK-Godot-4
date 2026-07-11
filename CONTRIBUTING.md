@@ -19,7 +19,7 @@ Thanks for wanting to help out. This is a community-made SDK, so contributions a
 
 - Keep PRs focused. One thing per PR is easier to review.
 - GDScript only. No C#.
-- Test against Godot 4.x before submitting.
+- Test against Godot 4.7+ before submitting.
 - If you are adding a new feature, add a usage example in the PR description.
 
 ## Not sure if something is worth a PR?

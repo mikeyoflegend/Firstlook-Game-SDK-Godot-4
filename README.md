@@ -19,7 +19,7 @@ A community-made Godot 4 plugin that lets you integrate [FirstLook.gg](https://f
 
 ## Requirements
 
-- **Godot 4.x**
+- **Godot 4.7+**
 - **GodotSteam** — required for Steam authentication. Get it at [godotsteam.com](https://godotsteam.com).
 - A **FirstLook account** with a game set up. Sign up at [firstlook.gg](https://firstlook.gg).
 

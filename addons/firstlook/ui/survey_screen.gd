@@ -204,11 +204,13 @@ func _build_single_select(qid: String, options: Array) -> VBoxContainer:
 
 	var group := ButtonGroup.new()
 	for opt in options:
-		var btn := _make_option_button(opt.get("label", str(opt)), true)
+		var opt_label := opt.get("label", str(opt))
+		var opt_value = opt.get("value", opt_label)
+		var btn := _make_option_button(opt_label, true)
 		btn.button_group = group
 		btn.toggled.connect(func(pressed):
 			if pressed:
-				_responses[qid] = opt.get("value", opt.get("label", str(opt)))
+				_responses[qid] = opt_value
 		)
 		vbox.add_child(btn)
 
@@ -220,8 +222,9 @@ func _build_multi_select(qid: String, options: Array) -> VBoxContainer:
 	vbox.add_theme_constant_override("separation", 8)
 
 	for opt in options:
-		var val = opt.get("value", opt.get("label", str(opt)))
-		var btn := _make_option_button(opt.get("label", str(opt)), false)
+		var opt_label := opt.get("label", str(opt))
+		var val = opt.get("value", opt_label)
+		var btn := _make_option_button(opt_label, false)
 		btn.toggled.connect(func(pressed):
 			if not _responses.has(qid):
 				_responses[qid] = []
@@ -423,6 +426,8 @@ func _build_matrix(qid: String, rows: Array, columns: Array) -> GridContainer:
 		var group := ButtonGroup.new()
 		for col in columns:
 			var col_val = col.get("value", col.get("label", str(col)))
+			var selected_row_id := row_id
+			var selected_col_val = col_val
 			var rb := CheckBox.new()
 			rb.button_group = group
 			rb.alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -430,7 +435,7 @@ func _build_matrix(qid: String, rows: Array, columns: Array) -> GridContainer:
 				if pressed:
 					if not _responses.has(qid):
 						_responses[qid] = {}
-					_responses[qid][row_id] = col_val
+					_responses[qid][selected_row_id] = selected_col_val
 			)
 			grid.add_child(rb)
 
