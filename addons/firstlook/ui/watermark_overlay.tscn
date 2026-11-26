@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/firstlook/ui/watermark_overlay.gd" id="1_watermark"]
+
+[node name="FirstLookWatermark" type="CanvasLayer"]
+layer = 120
+script = ExtResource("1_watermark")

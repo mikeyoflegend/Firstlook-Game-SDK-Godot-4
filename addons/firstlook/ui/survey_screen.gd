@@ -1,546 +1,683 @@
 ## FirstLook Survey Screen
-## Handles all FirstLook question types:
-##   single_select, multi_select, rating, nps, sentiment, text_area, yes_no, matrix
+## A ready-made, dark-themed UI for FirstLook's paged in-game surveys.
 ##
-## Setup:
-##   1. Add survey_screen.tscn to your scene as a CanvasLayer.
-##   2. Connect FirstLook.surveys.survey_available to show_survey().
+## Native question kinds it draws:
+##   block (text), image, textarea, single_select, multi_select,
+##   rating, n_p_s, sentiment (opinion scale), yes_no
+## Matrix, image choice, and video questions are web-only in FirstLook,
+## so surveys that use them arrive on browser_survey_available instead.
 ##
-## Example:
-##   FirstLook.surveys.survey_available.connect($SurveyScreen.show_survey)
+## Setup (pick one):
+##   A. Drag addons/firstlook/ui/survey_screen.tscn into your main scene.
+##   B. Add a CanvasLayer node and attach this script to it.
+## With auto_connect on (default) it shows surveys by itself. Just fire
+## triggers with FirstLook.surveys.post_trigger_event("match.completed").
 
+class_name FirstLookSurveyScreen
 extends CanvasLayer
 
-## Emitted when the player submits their responses.
+## A page was sent to FirstLook.
+signal page_submitted(page_index: int)
+
+## The whole survey was finished.
+signal survey_completed
+
+## The player closed the survey before finishing.
+signal survey_dismissed
+
+## Kept for older code: emitted together with survey_completed.
 signal survey_submitted
 
-## Emitted when the player dismisses the survey without submitting.
-signal survey_dismissed
+## Show surveys automatically when FirstLook sends one.
+@export var auto_connect: bool = true
+
+## Make the mouse cursor visible while the survey is open, then put it
+## back the way it was. Helpful for games that capture the mouse.
+@export var show_mouse_cursor: bool = true
 
 # --- Theme colors ---
 const COLOR_BG         := Color(0.10, 0.10, 0.12, 0.97)
 const COLOR_PANEL      := Color(0.15, 0.15, 0.18, 1.0)
 const COLOR_ACCENT     := Color(0.27, 0.60, 1.0,  1.0)
-const COLOR_ACCENT_HOV := Color(0.37, 0.70, 1.0,  1.0)
 const COLOR_SELECTED   := Color(0.20, 0.45, 0.85, 1.0)
 const COLOR_TEXT       := Color(0.92, 0.92, 0.95, 1.0)
 const COLOR_SUBTEXT    := Color(0.60, 0.60, 0.65, 1.0)
 const COLOR_INPUT_BG   := Color(0.12, 0.12, 0.15, 1.0)
 const COLOR_BORDER     := Color(0.28, 0.28, 0.33, 1.0)
+const COLOR_ERROR      := Color(1.0,  0.45, 0.45, 1.0)
 
-# Sentiment emoji options
-const SENTIMENT_OPTIONS := ["😡", "😞", "😐", "🙂", "😍"]
-const SENTIMENT_LABELS  := ["Hate it", "Dislike it", "It's ok", "Like it", "Love it"]
+const SENTIMENT_EMOJIS := ["😡", "😞", "😐", "🙂", "😍"]
+const RATING_ICONS := { "star": "★", "heart": "♥", "smile": "☺", "thumbs_up": "👍", "thumbsup": "👍" }
 
-var _survey_data: Dictionary = {}
-var _responses: Dictionary = {}  # questionId -> value
+var _page_response: Dictionary = {}
+var _answers: Dictionary = {}       # question uuid -> value, all pages so far
+var _questions: Array = []          # questions on the current page
+var _question_nodes: Dictionary = {} # question uuid -> Control
+var _busy: bool = false
+var _saved_mouse_mode: int = -1
 
-var _overlay: ColorRect
-var _panel: PanelContainer
+var _title_label: Label
+var _page_label: Label
 var _scroll: ScrollContainer
 var _vbox: VBoxContainer
-var _page_label: Label
-var _submit_btn: Button
-var _dismiss_btn: Button
+var _error_label: Label
+var _next_btn: Button
 
 func _ready() -> void:
+	layer = max(layer, 100)
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	_build_base_ui()
 	hide()
+	if auto_connect:
+		var sdk := get_node_or_null("/root/FirstLook")
+		if sdk != null and sdk.has_signal("survey_available"):
+			sdk.connect("survey_available", show_survey)
 
 # --- Public API ---
 
-func show_survey(data: Dictionary) -> void:
-	_survey_data = data
-	_responses = {}
-	_populate_questions()
+## Show a survey page response from FirstLook.
+func show_survey(page_response: Dictionary) -> void:
+	if page_response.is_empty() or page_response.get("page") == null:
+		return
+	if not visible:
+		_answers = {}
+		if show_mouse_cursor:
+			_saved_mouse_mode = Input.mouse_mode
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_page_response = page_response
+	_render_page()
 	show()
 
-# --- UI Construction ---
+func close() -> void:
+	hide()
+	_page_response = {}
+	if _saved_mouse_mode != -1:
+		Input.mouse_mode = _saved_mouse_mode as Input.MouseMode
+		_saved_mouse_mode = -1
+
+# --- Layout ---
 
 func _build_base_ui() -> void:
-	_overlay = ColorRect.new()
-	_overlay.color = Color(0, 0, 0, 0.6)
-	_overlay.anchors_preset = Control.PRESET_FULL_RECT
-	add_child(_overlay)
+	var overlay := ColorRect.new()
+	overlay.color = Color(0, 0, 0, 0.6)
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(overlay)
 
-	_panel = PanelContainer.new()
-	_panel.anchors_preset = Control.PRESET_CENTER
-	_panel.custom_minimum_size = Vector2(560, 0)
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(center)
 
-	var style := StyleBoxFlat.new()
-	style.bg_color = COLOR_BG
-	style.corner_radius_top_left    = 12
-	style.corner_radius_top_right   = 12
-	style.corner_radius_bottom_left = 12
-	style.corner_radius_bottom_right = 12
-	style.border_color = COLOR_BORDER
-	style.border_width_left   = 1
-	style.border_width_right  = 1
-	style.border_width_top    = 1
-	style.border_width_bottom = 1
-	style.content_margin_left   = 32
-	style.content_margin_right  = 32
-	style.content_margin_top    = 28
-	style.content_margin_bottom = 28
-	_panel.add_theme_stylebox_override("panel", style)
-	add_child(_panel)
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(600, 0)
+	var style := _box(COLOR_BG, COLOR_BORDER, 1, 12)
+	style.set_content_margin_all(28)
+	panel.add_theme_stylebox_override("panel", style)
+	center.add_child(panel)
 
-	var outer_vbox := VBoxContainer.new()
-	outer_vbox.add_theme_constant_override("separation", 20)
-	_panel.add_child(outer_vbox)
+	var outer := VBoxContainer.new()
+	outer.add_theme_constant_override("separation", 16)
+	panel.add_child(outer)
 
-	# Header row
 	var header := HBoxContainer.new()
-	outer_vbox.add_child(header)
+	outer.add_child(header)
 
-	var title_label := Label.new()
-	title_label.text = _survey_data.get("title", "Quick Survey")
-	title_label.add_theme_color_override("font_color", COLOR_TEXT)
-	title_label.add_theme_font_size_override("font_size", 18)
-	title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(title_label)
+	_title_label = _label("Quick Survey", 20, COLOR_TEXT)
+	_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_title_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	header.add_child(_title_label)
 
-	_dismiss_btn = Button.new()
-	_dismiss_btn.text = "✕"
-	_dismiss_btn.flat = true
-	_dismiss_btn.add_theme_color_override("font_color", COLOR_SUBTEXT)
-	_dismiss_btn.pressed.connect(_on_dismiss_pressed)
-	header.add_child(_dismiss_btn)
+	var dismiss := Button.new()
+	dismiss.text = "✕"
+	dismiss.flat = true
+	dismiss.tooltip_text = "Close"
+	dismiss.add_theme_color_override("font_color", COLOR_SUBTEXT)
+	dismiss.pressed.connect(_on_dismiss_pressed)
+	header.add_child(dismiss)
 
-	# Page tracker label
-	_page_label = Label.new()
-	_page_label.add_theme_color_override("font_color", COLOR_SUBTEXT)
-	_page_label.add_theme_font_size_override("font_size", 12)
-	outer_vbox.add_child(_page_label)
+	_page_label = _label("", 12, COLOR_SUBTEXT)
+	outer.add_child(_page_label)
 
-	# Scrollable question area
 	_scroll = ScrollContainer.new()
-	_scroll.custom_minimum_size.y = 360
-	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	outer_vbox.add_child(_scroll)
+	_scroll.custom_minimum_size = Vector2(0, 380)
+	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	outer.add_child(_scroll)
+
+	# Right margin keeps content clear of the scrollbar.
+	var margin := MarginContainer.new()
+	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	margin.add_theme_constant_override("margin_right", 16)
+	_scroll.add_child(margin)
 
 	_vbox = VBoxContainer.new()
-	_vbox.add_theme_constant_override("separation", 24)
+	_vbox.add_theme_constant_override("separation", 26)
 	_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll.add_child(_vbox)
+	margin.add_child(_vbox)
 
-	# Submit button
-	_submit_btn = Button.new()
-	_submit_btn.text = "Submit"
-	_submit_btn.custom_minimum_size.y = 44
-	_apply_accent_button_style(_submit_btn)
-	_submit_btn.pressed.connect(_on_submit_pressed)
-	outer_vbox.add_child(_submit_btn)
+	_error_label = _label("", 13, COLOR_ERROR)
+	_error_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_error_label.hide()
+	outer.add_child(_error_label)
 
-func _populate_questions() -> void:
-	# Update title in case show_survey was called after _ready
-	if _panel and _panel.get_child_count() > 0:
-		var ov = _panel.get_child(0)
-		if ov.get_child_count() > 0:
-			var header = ov.get_child(0)
-			if header.get_child_count() > 0:
-				header.get_child(0).text = _survey_data.get("title", "Quick Survey")
+	_next_btn = Button.new()
+	_next_btn.text = "Next"
+	_next_btn.custom_minimum_size.y = 44
+	_style_accent(_next_btn)
+	_next_btn.pressed.connect(_on_next_pressed)
+	outer.add_child(_next_btn)
 
+func _render_page() -> void:
 	for child in _vbox.get_children():
 		child.queue_free()
+	_question_nodes = {}
+	_error_label.hide()
 
-	var questions: Array = _survey_data.get("questions", [])
-	_page_label.text = "%d question%s" % [questions.size(), "s" if questions.size() != 1 else ""]
+	var survey: Dictionary = _page_response.get("survey", {})
+	var page: Dictionary = _page_response.get("page", {})
+	_title_label.text = str(survey.get("name", "Quick Survey"))
 
-	for q in questions:
-		_vbox.add_child(_build_question(q))
+	var total := FirstLookSurveys.get_page_count(_page_response)
+	var index_v: Variant = _page_response.get("page_index")
+	var index: int = int(index_v) if index_v != null else 0
+	var is_last := total > 0 and index >= total - 1
+	_page_label.text = "Page %d of %d" % [index + 1, total] if total > 1 else ""
+	_page_label.visible = _page_label.text != ""
+	_next_btn.text = "Submit" if (is_last or total <= 1) else "Next"
+	_next_btn.disabled = false
+
+	var page_title := str(page.get("title", ""))
+	var page_desc := str(page.get("description", "")) if page.get("description") != null else ""
+	if (page_title != "" and page_title != _title_label.text) or page_desc != "":
+		var head := VBoxContainer.new()
+		head.add_theme_constant_override("separation", 4)
+		if page_title != "" and page_title != _title_label.text:
+			head.add_child(_label(page_title, 17, COLOR_TEXT))
+		if page_desc != "":
+			var d := _label(page_desc, 13, COLOR_SUBTEXT)
+			d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			head.add_child(d)
+		_vbox.add_child(head)
+
+	_questions = page.get("questions", [])
+	for q in _questions:
+		var node := _build_question(q)
+		if node != null:
+			_question_nodes[str(q.get("uuid", ""))] = node
+			_vbox.add_child(node)
+	_refresh_conditions()
+	_scroll.scroll_vertical = 0
+
+func _show_completion() -> void:
+	for child in _vbox.get_children():
+		child.queue_free()
+	_question_nodes = {}
+	_error_label.hide()
+	_page_label.hide()
+
+	var msg := FirstLookSurveys.get_completion_message(_page_response)
+	var title := str(msg.get("title", "Thanks for your feedback!"))
+	var body := str(msg.get("body", "Your answers were sent."))
+	_vbox.add_child(_label(title, 18, COLOR_TEXT))
+	var b := _label(body, 14, COLOR_SUBTEXT)
+	b.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_vbox.add_child(b)
+	_next_btn.text = "Close"
+	_next_btn.disabled = false
+
+# --- Questions ---
 
 func _build_question(q: Dictionary) -> Control:
-	var container := VBoxContainer.new()
-	container.add_theme_constant_override("separation", 12)
-	container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var kind := str(q.get("kind", ""))
+	var qid := str(q.get("uuid", ""))
+	var cfg: Dictionary = q.get("config", {}) if q.get("config") is Dictionary else {}
+	var required: bool = cfg.get("required", false) == true
 
-	# Question text
-	var label := Label.new()
-	label.text = q.get("text", "")
-	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	label.add_theme_color_override("font_color", COLOR_TEXT)
-	label.add_theme_font_size_override("font_size", 14)
-	container.add_child(label)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
-	# Optional description
-	if q.has("description") and q["description"] != "":
-		var desc := Label.new()
-		desc.text = q["description"]
-		desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		desc.add_theme_color_override("font_color", COLOR_SUBTEXT)
-		desc.add_theme_font_size_override("font_size", 12)
-		container.add_child(desc)
+	var title := _text(q, "title")
+	if title != "":
+		var t := _label(title + ("  *" if required and kind != "block" else ""), 15, COLOR_TEXT)
+		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		box.add_child(t)
+	for key in ["subtitle", "description"]:
+		var extra := _text(q, key)
+		if extra != "":
+			var e := _label(extra, 12, COLOR_SUBTEXT)
+			e.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			box.add_child(e)
 
-	var qid: String = q.get("id", "")
-	var qtype: String = q.get("type", "text_area")
-	var options: Array = q.get("options", [])
+	var options: Array = q.get("options", []) if q.get("options") is Array else []
 
-	match qtype:
+	match kind:
+		"block":
+			pass
+		"image":
+			box.add_child(_build_image(_text(q, "url")))
+		"textarea":
+			box.add_child(_build_text(qid, cfg.get("multiple_lines", false) == true))
 		"single_select":
-			container.add_child(_build_single_select(qid, options))
+			box.add_child(_build_choices(qid, options, false, cfg))
 		"multi_select":
-			container.add_child(_build_multi_select(qid, options))
+			box.add_child(_build_choices(qid, options, true, cfg))
 		"rating":
-			container.add_child(_build_rating(qid, q.get("max", 5)))
-		"nps":
-			container.add_child(_build_nps(qid))
+			box.add_child(_build_rating(qid, _int(cfg.get("scale"), 5), str(cfg.get("icon", "star"))))
+		"n_p_s":
+			box.add_child(_build_scale(qid, 0, 10, "Not likely", "Very likely", false))
 		"sentiment":
-			container.add_child(_build_sentiment(qid))
+			var n := _int(cfg.get("scale"), 5)
+			var labels: bool = cfg.get("show_labels", true) != false
+			box.add_child(_build_scale(qid, 1, n, "Strongly disagree" if labels else "", "Strongly agree" if labels else "", cfg.get("use_emojis", false) == true))
 		"yes_no":
-			container.add_child(_build_yes_no(qid))
-		"matrix":
-			container.add_child(_build_matrix(qid, q.get("rows", []), q.get("columns", [])))
-		_:  # text_area and fallback
-			container.add_child(_build_text_area(qid, q.get("placeholder", "Your answer...")))
+			box.add_child(_build_yes_no(qid))
+		_:
+			var note := _label("(This question can only be answered in the browser version of the survey.)", 12, COLOR_SUBTEXT)
+			note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			box.add_child(note)
 
-	return container
+	return box
 
-# --- Question Type Builders ---
+func _build_text(qid: String, multi_line: bool) -> Control:
+	var style := _box(COLOR_INPUT_BG, COLOR_BORDER, 1, 6)
+	style.set_content_margin_all(10)
+	if multi_line:
+		var te := TextEdit.new()
+		te.custom_minimum_size.y = 110
+		te.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+		te.placeholder_text = "Your answer..."
+		te.add_theme_stylebox_override("normal", style)
+		te.add_theme_color_override("font_color", COLOR_TEXT)
+		te.text = str(_answers.get(qid, ""))
+		te.text_changed.connect(func() -> void: _set_answer(qid, te.text.strip_edges()))
+		return te
+	var le := LineEdit.new()
+	le.custom_minimum_size.y = 40
+	le.placeholder_text = "Your answer..."
+	le.add_theme_stylebox_override("normal", style)
+	le.add_theme_color_override("font_color", COLOR_TEXT)
+	le.text = str(_answers.get(qid, ""))
+	le.text_changed.connect(func(t: String) -> void: _set_answer(qid, t.strip_edges()))
+	return le
 
-func _build_single_select(qid: String, options: Array) -> VBoxContainer:
+func _build_choices(qid: String, options: Array, multiple: bool, cfg: Dictionary) -> Control:
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 8)
+	var group: ButtonGroup = null if multiple else ButtonGroup.new()
+	var max_sel: int = _int(cfg.get("max_selections"), 0)
+	var selected: Array = []
+	var other_text := { "value": "" }
+	var buttons: Array[Button] = []
 
-	var group := ButtonGroup.new()
+	var other_edit := LineEdit.new()
+	other_edit.placeholder_text = "Type your answer..."
+	other_edit.custom_minimum_size.y = 38
+	other_edit.add_theme_color_override("font_color", COLOR_TEXT)
+	var other_style := _box(COLOR_INPUT_BG, COLOR_BORDER, 1, 6)
+	other_style.set_content_margin_all(8)
+	other_edit.add_theme_stylebox_override("normal", other_style)
+	other_edit.hide()
+
+	var publish := func() -> void:
+		var values: Array = selected.duplicate()
+		var other_i := values.find("__other__")
+		if other_i != -1:
+			values.remove_at(other_i)
+			if str(other_text.value) != "":
+				values.append(str(other_text.value))
+		if multiple:
+			_set_answer(qid, values if not values.is_empty() else null)
+		else:
+			_set_answer(qid, values[0] if not values.is_empty() else null)
+
+	var entries: Array = []
 	for opt in options:
-		var opt_label := opt.get("label", str(opt))
-		var opt_value = opt.get("value", opt_label)
-		var btn := _make_option_button(opt_label, true)
-		btn.button_group = group
-		btn.toggled.connect(func(pressed):
-			if pressed:
-				_responses[qid] = opt_value
-		)
-		vbox.add_child(btn)
+		if opt is Dictionary:
+			entries.append({ "label": str(opt.get("label", opt.get("value", ""))), "value": str(opt.get("value", opt.get("label", ""))) })
+		else:
+			entries.append({ "label": str(opt), "value": str(opt) })
+	if cfg.get("other", false) == true:
+		entries.append({ "label": "Other", "value": "__other__" })
 
-	return vbox
-
-func _build_multi_select(qid: String, options: Array) -> VBoxContainer:
-	_responses[qid] = []
-	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 8)
-
-	for opt in options:
-		var opt_label := opt.get("label", str(opt))
-		var val = opt.get("value", opt_label)
-		var btn := _make_option_button(opt_label, false)
-		btn.toggled.connect(func(pressed):
-			if not _responses.has(qid):
-				_responses[qid] = []
-			if pressed:
-				if val not in _responses[qid]:
-					_responses[qid].append(val)
+	for entry in entries:
+		var value: String = entry.value
+		var btn := _option_button(entry.label)
+		if group != null:
+			btn.button_group = group
+		btn.toggled.connect(func(on: bool) -> void:
+			if on:
+				if not multiple:
+					selected.clear()
+				if max_sel > 0 and selected.size() >= max_sel:
+					btn.set_pressed_no_signal(false)
+					_show_error("You can pick up to %d." % max_sel)
+					return
+				if not selected.has(value):
+					selected.append(value)
 			else:
-				_responses[qid].erase(val)
+				selected.erase(value)
+			other_edit.visible = selected.has("__other__")
+			publish.call()
 		)
+		buttons.append(btn)
 		vbox.add_child(btn)
 
+	other_edit.text_changed.connect(func(t: String) -> void:
+		other_text.value = t.strip_edges()
+		publish.call()
+	)
+	vbox.add_child(other_edit)
 	return vbox
 
-func _build_rating(qid: String, max_stars: int) -> HBoxContainer:
+func _build_rating(qid: String, count: int, icon: String) -> Control:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 6)
-
+	var symbol: String = RATING_ICONS.get(icon.to_lower(), "★")
 	var stars: Array[Button] = []
-	for i in range(1, max_stars + 1):
+	for i in range(1, count + 1):
 		var star := Button.new()
-		star.text = "★"
+		star.text = symbol
 		star.flat = true
-		star.add_theme_font_size_override("font_size", 28)
+		star.tooltip_text = str(i)
+		star.add_theme_font_size_override("font_size", 30)
 		star.add_theme_color_override("font_color", COLOR_SUBTEXT)
-		var idx := i
-		star.pressed.connect(func():
-			_responses[qid] = idx
+		var val: int = i
+		star.pressed.connect(func() -> void:
+			_set_answer(qid, val)
 			for j in range(stars.size()):
-				stars[j].add_theme_color_override("font_color",
-					COLOR_ACCENT if j < idx else COLOR_SUBTEXT)
+				var c: Color = COLOR_ACCENT if j < val else COLOR_SUBTEXT
+				stars[j].add_theme_color_override("font_color", c)
+				stars[j].add_theme_color_override("font_hover_color", c)
 		)
 		stars.append(star)
 		hbox.add_child(star)
-
 	return hbox
 
-func _build_nps(qid: String) -> VBoxContainer:
+func _build_scale(qid: String, low: int, high: int, low_label: String, high_label: String, emojis: bool) -> Control:
 	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 8)
-
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 4)
-	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
-
+	vbox.add_theme_constant_override("separation", 6)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	var buttons: Array[Button] = []
-	for i in range(0, 11):
+	var steps := high - low + 1
+	for i in range(low, high + 1):
 		var btn := Button.new()
-		btn.text = str(i)
-		btn.custom_minimum_size = Vector2(42, 42)
-		_apply_outline_button_style(btn)
-		var val := i
-		btn.pressed.connect(func():
-			_responses[qid] = val
-			for j in range(buttons.size()):
-				_apply_outline_button_style(buttons[j])
-			_apply_accent_button_style(btn)
+		if emojis:
+			var e_index := int(round(float(i - low) / max(1, steps - 1) * (SENTIMENT_EMOJIS.size() - 1)))
+			btn.text = SENTIMENT_EMOJIS[e_index]
+			btn.add_theme_font_size_override("font_size", 24)
+		else:
+			btn.text = str(i)
+		btn.custom_minimum_size = Vector2(40 if steps > 7 else 48, 44)
+		_style_outline(btn)
+		var val: int = i
+		btn.pressed.connect(func() -> void:
+			_set_answer(qid, val)
+			for b in buttons:
+				_style_outline(b)
+			_style_accent(btn)
+		)
+		buttons.append(btn)
+		row.add_child(btn)
+	vbox.add_child(row)
+
+	if low_label != "" or high_label != "":
+		var labels := HBoxContainer.new()
+		labels.add_child(_label(low_label, 11, COLOR_SUBTEXT))
+		var spacer := Control.new()
+		spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		labels.add_child(spacer)
+		labels.add_child(_label(high_label, 11, COLOR_SUBTEXT))
+		vbox.add_child(labels)
+	return vbox
+
+func _build_yes_no(qid: String) -> Control:
+	var hbox := HBoxContainer.new()
+	hbox.add_theme_constant_override("separation", 12)
+	var buttons: Array[Button] = []
+	for pair in [["Yes", true], ["No", false]]:
+		var btn := Button.new()
+		btn.text = pair[0]
+		btn.custom_minimum_size = Vector2(120, 44)
+		_style_outline(btn)
+		var val: bool = pair[1]
+		btn.pressed.connect(func() -> void:
+			_set_answer(qid, val)
+			for b in buttons:
+				_style_outline(b)
+			_style_accent(btn)
 		)
 		buttons.append(btn)
 		hbox.add_child(btn)
-
-	vbox.add_child(hbox)
-
-	var labels_row := HBoxContainer.new()
-	labels_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-
-	var not_likely := Label.new()
-	not_likely.text = "Not likely"
-	not_likely.add_theme_color_override("font_color", COLOR_SUBTEXT)
-	not_likely.add_theme_font_size_override("font_size", 11)
-	labels_row.add_child(not_likely)
-
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	labels_row.add_child(spacer)
-
-	var very_likely := Label.new()
-	very_likely.text = "Very likely"
-	very_likely.add_theme_color_override("font_color", COLOR_SUBTEXT)
-	very_likely.add_theme_font_size_override("font_size", 11)
-	labels_row.add_child(very_likely)
-
-	vbox.add_child(labels_row)
-	return vbox
-
-func _build_sentiment(qid: String) -> HBoxContainer:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 12)
-	hbox.alignment = BoxContainer.ALIGNMENT_CENTER
-
-	var btns: Array[Button] = []
-	for i in range(SENTIMENT_OPTIONS.size()):
-		var col := VBoxContainer.new()
-		col.add_theme_constant_override("separation", 4)
-
-		var emoji_btn := Button.new()
-		emoji_btn.text = SENTIMENT_OPTIONS[i]
-		emoji_btn.flat = true
-		emoji_btn.add_theme_font_size_override("font_size", 32)
-		var val := i + 1
-		emoji_btn.pressed.connect(func():
-			_responses[qid] = val
-			for b in btns:
-				b.add_theme_color_override("font_color", COLOR_SUBTEXT)
-			emoji_btn.add_theme_color_override("font_color", COLOR_ACCENT)
-		)
-		btns.append(emoji_btn)
-		col.add_child(emoji_btn)
-
-		var lbl := Label.new()
-		lbl.text = SENTIMENT_LABELS[i]
-		lbl.add_theme_color_override("font_color", COLOR_SUBTEXT)
-		lbl.add_theme_font_size_override("font_size", 10)
-		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		col.add_child(lbl)
-
-		hbox.add_child(col)
-
 	return hbox
 
-func _build_yes_no(qid: String) -> HBoxContainer:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 12)
-
-	for opt in ["Yes", "No"]:
-		var btn := Button.new()
-		btn.text = opt
-		btn.custom_minimum_size = Vector2(120, 44)
-		_apply_outline_button_style(btn)
-		var val := opt
-		btn.pressed.connect(func():
-			_responses[qid] = val
-			for child in hbox.get_children():
-				_apply_outline_button_style(child)
-			_apply_accent_button_style(btn)
-		)
-		hbox.add_child(btn)
-
-	return hbox
-
-func _build_text_area(qid: String, placeholder: String) -> TextEdit:
-	var input := TextEdit.new()
-	input.placeholder_text = placeholder
-	input.custom_minimum_size.y = 100
-	input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	input.add_theme_color_override("font_color", COLOR_TEXT)
-	input.add_theme_color_override("background_color", COLOR_INPUT_BG)
-
-	var style := StyleBoxFlat.new()
-	style.bg_color = COLOR_INPUT_BG
-	style.border_color = COLOR_BORDER
-	style.border_width_left   = 1
-	style.border_width_right  = 1
-	style.border_width_top    = 1
-	style.border_width_bottom = 1
-	style.corner_radius_top_left     = 6
-	style.corner_radius_top_right    = 6
-	style.corner_radius_bottom_left  = 6
-	style.corner_radius_bottom_right = 6
-	style.content_margin_left   = 10
-	style.content_margin_right  = 10
-	style.content_margin_top    = 8
-	style.content_margin_bottom = 8
-	input.add_theme_stylebox_override("normal", style)
-
-	input.text_changed.connect(func():
-		_responses[qid] = input.text
+func _build_image(url: String) -> Control:
+	var rect := TextureRect.new()
+	rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	rect.custom_minimum_size = Vector2(0, 200)
+	if url == "":
+		return rect
+	var req := HTTPRequest.new()
+	rect.add_child(req)
+	req.request_completed.connect(func(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+		req.queue_free()
+		if result != HTTPRequest.RESULT_SUCCESS or code != 200:
+			return
+		var img := Image.new()
+		if img.load_png_from_buffer(body) == OK or img.load_jpg_from_buffer(body) == OK or img.load_webp_from_buffer(body) == OK:
+			rect.texture = ImageTexture.create_from_image(img)
 	)
-	return input
+	req.request.call_deferred(url)
+	return rect
 
-func _build_matrix(qid: String, rows: Array, columns: Array) -> GridContainer:
-	var grid := GridContainer.new()
-	grid.columns = columns.size() + 1
-	grid.add_theme_constant_override("h_separation", 12)
-	grid.add_theme_constant_override("v_separation", 8)
-	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+# --- Answers and conditions ---
 
-	# Header row. First cell blank.
-	var blank := Label.new()
-	grid.add_child(blank)
+func _set_answer(qid: String, value: Variant) -> void:
+	if value == null or (value is String and value == ""):
+		_answers.erase(qid)
+	else:
+		_answers[qid] = value
+	_error_label.hide()
+	_refresh_conditions()
 
-	for col in columns:
-		var lbl := Label.new()
-		lbl.text = col.get("label", str(col))
-		lbl.add_theme_color_override("font_color", COLOR_SUBTEXT)
-		lbl.add_theme_font_size_override("font_size", 12)
-		lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		grid.add_child(lbl)
+func _refresh_conditions() -> void:
+	for q in _questions:
+		var qid := str(q.get("uuid", ""))
+		var node: Control = _question_nodes.get(qid)
+		if node == null:
+			continue
+		var show_it := _conditions_met(q)
+		node.visible = show_it
 
-	# Data rows
-	for row in rows:
-		var row_label := Label.new()
-		row_label.text = row.get("label", str(row))
-		row_label.add_theme_color_override("font_color", COLOR_TEXT)
-		row_label.add_theme_font_size_override("font_size", 13)
-		row_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		grid.add_child(row_label)
+func _conditions_met(q: Dictionary) -> bool:
+	var conds: Variant = q.get("conditions")
+	if not (conds is Array):
+		return true
+	for c in conds:
+		if not (c is Dictionary):
+			continue
+		var answer: Variant = _answers.get(str(c.get("question_uuid", "")))
+		if not _check(answer, str(c.get("operator", "equals")), c.get("value")):
+			return false
+	return true
 
-		var row_id: String = row.get("id", row.get("label", str(row)))
-		var group := ButtonGroup.new()
-		for col in columns:
-			var col_val = col.get("value", col.get("label", str(col)))
-			var selected_row_id := row_id
-			var selected_col_val = col_val
-			var rb := CheckBox.new()
-			rb.button_group = group
-			rb.alignment = HORIZONTAL_ALIGNMENT_CENTER
-			rb.toggled.connect(func(pressed):
-				if pressed:
-					if not _responses.has(qid):
-						_responses[qid] = {}
-					_responses[qid][selected_row_id] = selected_col_val
-			)
-			grid.add_child(rb)
+func _check(answer: Variant, op: String, target: Variant) -> bool:
+	if answer == null:
+		return op == "not_equals" or op == "not_contains"
+	var a := FirstLookSurveys.encode_answer(answer)
+	var t := FirstLookSurveys.encode_answer(target)
+	match op:
+		"equals":
+			return a == t
+		"not_equals":
+			return a != t
+		"greater_than":
+			return a.to_float() > t.to_float()
+		"greater_than_or_equal":
+			return a.to_float() >= t.to_float()
+		"less_than":
+			return a.to_float() < t.to_float()
+		"less_than_or_equal":
+			return a.to_float() <= t.to_float()
+		"contains":
+			return _as_list(answer).has(t) or a.contains(t)
+		"not_contains":
+			return not (_as_list(answer).has(t) or a.contains(t))
+		"contains_any":
+			var mine := _as_list(answer)
+			for item in _as_list(target):
+				if mine.has(item):
+					return true
+			return false
+	return true
 
-	return grid
+func _as_list(v: Variant) -> Array:
+	var out: Array = []
+	if v is Array:
+		for x in v:
+			out.append(FirstLookSurveys.encode_answer(x))
+	elif v != null:
+		out.append(FirstLookSurveys.encode_answer(v))
+	return out
+
+func _page_answers() -> Dictionary:
+	var out := {}
+	for q in _questions:
+		var qid := str(q.get("uuid", ""))
+		var node: Control = _question_nodes.get(qid)
+		if node != null and node.visible and _answers.has(qid):
+			out[qid] = _answers[qid]
+	return out
+
+func _missing_required() -> String:
+	for q in _questions:
+		var qid := str(q.get("uuid", ""))
+		var node: Control = _question_nodes.get(qid)
+		var cfg: Variant = q.get("config")
+		var required: bool = cfg is Dictionary and cfg.get("required", false) == true
+		if required and q.get("kind") != "block" and node != null and node.visible and not _answers.has(qid):
+			var title := _text(q, "title")
+			return title if title != "" else "a required question"
+	return ""
+
+# --- Actions ---
+
+func _on_next_pressed() -> void:
+	if _busy:
+		return
+	if _question_nodes.is_empty() and _next_btn.text == "Close":
+		survey_completed.emit()
+		survey_submitted.emit()
+		close()
+		return
+
+	var missing := _missing_required()
+	if missing != "":
+		_show_error("Please answer: " + missing)
+		return
+
+	var sdk := get_node_or_null("/root/FirstLook")
+	if sdk == null or sdk.get("surveys") == null:
+		_show_error("FirstLook is not set up.")
+		return
+
+	_busy = true
+	_next_btn.disabled = true
+	_next_btn.text = "Sending..."
+	var index_v: Variant = _page_response.get("page_index")
+	var index: int = int(index_v) if index_v != null else 0
+	var next: Dictionary = await sdk.surveys.submit_page(_page_response, _page_answers())
+	_busy = false
+
+	if next.has("error"):
+		_next_btn.disabled = false
+		_next_btn.text = "Try again"
+		_show_error("Could not send your answers. " + str(next.error))
+		return
+
+	page_submitted.emit(index)
+	if next.get("completed", false) or next.get("page") == null:
+		if not next.is_empty():
+			_page_response = next
+		_show_completion()
+	else:
+		_page_response = next
+		_render_page()
+
+func _on_dismiss_pressed() -> void:
+	survey_dismissed.emit()
+	close()
+
+func _show_error(message: String) -> void:
+	_error_label.text = message
+	_error_label.show()
 
 # --- Helpers ---
 
-func _make_option_button(text: String, is_radio: bool) -> Button:
+func _text(q: Dictionary, key: String) -> String:
+	var v: Variant = q.get(key)
+	return str(v) if v != null else ""
+
+func _int(v: Variant, fallback: int) -> int:
+	if v == null:
+		return fallback
+	var n := int(v)
+	return n if n > 0 else fallback
+
+func _label(text: String, size: int, color: Color) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", size)
+	l.add_theme_color_override("font_color", color)
+	return l
+
+func _box(bg: Color, border: Color, border_w: int, radius: int) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = bg
+	s.border_color = border
+	s.set_border_width_all(border_w)
+	s.set_corner_radius_all(radius)
+	return s
+
+func _option_button(text: String) -> Button:
 	var btn := Button.new()
-	btn.text = "  " + text
+	btn.text = text
 	btn.toggle_mode = true
 	btn.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	btn.custom_minimum_size.y = 40
-
-	var normal := StyleBoxFlat.new()
-	normal.bg_color = COLOR_PANEL
-	normal.border_color = COLOR_BORDER
-	normal.border_width_left   = 1
-	normal.border_width_right  = 1
-	normal.border_width_top    = 1
-	normal.border_width_bottom = 1
-	normal.corner_radius_top_left     = 6
-	normal.corner_radius_top_right    = 6
-	normal.corner_radius_bottom_left  = 6
-	normal.corner_radius_bottom_right = 6
-	normal.content_margin_left = 12
-
-	var pressed_style := StyleBoxFlat.new()
-	pressed_style.bg_color = COLOR_SELECTED
-	pressed_style.border_color = COLOR_ACCENT
-	pressed_style.border_width_left   = 2
-	pressed_style.border_width_right  = 2
-	pressed_style.border_width_top    = 2
-	pressed_style.border_width_bottom = 2
-	pressed_style.corner_radius_top_left     = 6
-	pressed_style.corner_radius_top_right    = 6
-	pressed_style.corner_radius_bottom_left  = 6
-	pressed_style.corner_radius_bottom_right = 6
-	pressed_style.content_margin_left = 12
-
+	btn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	var normal := _box(COLOR_PANEL, COLOR_BORDER, 1, 6)
+	normal.set_content_margin_all(10)
+	normal.content_margin_left = 14
+	var pressed := _box(COLOR_SELECTED, COLOR_ACCENT, 2, 6)
+	pressed.set_content_margin_all(10)
+	pressed.content_margin_left = 14
 	btn.add_theme_stylebox_override("normal", normal)
-	btn.add_theme_stylebox_override("pressed", pressed_style)
 	btn.add_theme_stylebox_override("hover", normal)
-	btn.add_theme_color_override("font_color", COLOR_TEXT)
-	btn.add_theme_color_override("font_pressed_color", COLOR_TEXT)
-
+	btn.add_theme_stylebox_override("pressed", pressed)
+	btn.add_theme_stylebox_override("hover_pressed", pressed)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	for c in ["font_color", "font_hover_color", "font_pressed_color", "font_hover_pressed_color", "font_focus_color"]:
+		btn.add_theme_color_override(c, COLOR_TEXT)
 	return btn
 
-func _apply_accent_button_style(btn: Button) -> void:
-	var style := StyleBoxFlat.new()
-	style.bg_color = COLOR_ACCENT
-	style.corner_radius_top_left     = 6
-	style.corner_radius_top_right    = 6
-	style.corner_radius_bottom_left  = 6
-	style.corner_radius_bottom_right = 6
-	style.content_margin_left   = 16
-	style.content_margin_right  = 16
-	style.content_margin_top    = 8
-	style.content_margin_bottom = 8
-	btn.add_theme_stylebox_override("normal", style)
-	btn.add_theme_stylebox_override("hover", style)
-	btn.add_theme_stylebox_override("pressed", style)
-	btn.add_theme_color_override("font_color", Color.WHITE)
+func _style_accent(btn: Button) -> void:
+	var s := _box(COLOR_ACCENT, COLOR_ACCENT, 0, 6)
+	s.set_content_margin_all(8)
+	for state in ["normal", "hover", "pressed", "hover_pressed"]:
+		btn.add_theme_stylebox_override(state, s)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	for c in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
+		btn.add_theme_color_override(c, Color.WHITE)
 
-func _apply_outline_button_style(btn: Button) -> void:
-	var style := StyleBoxFlat.new()
-	style.bg_color = COLOR_PANEL
-	style.border_color = COLOR_BORDER
-	style.border_width_left   = 1
-	style.border_width_right  = 1
-	style.border_width_top    = 1
-	style.border_width_bottom = 1
-	style.corner_radius_top_left     = 6
-	style.corner_radius_top_right    = 6
-	style.corner_radius_bottom_left  = 6
-	style.corner_radius_bottom_right = 6
-	style.content_margin_left   = 12
-	style.content_margin_right  = 12
-	style.content_margin_top    = 8
-	style.content_margin_bottom = 8
-	btn.add_theme_stylebox_override("normal", style)
-	btn.add_theme_stylebox_override("hover", style)
-	btn.add_theme_stylebox_override("pressed", style)
-	btn.add_theme_color_override("font_color", COLOR_TEXT)
-
-# --- Actions ---
-
-func _on_submit_pressed() -> void:
-	var survey_id: String = _survey_data.get("id", "")
-	var response_array: Array = []
-
-	for qid in _responses:
-		response_array.append({ "questionId": qid, "value": _responses[qid] })
-
-	var result = await FirstLook.surveys.submit_response(survey_id, response_array)
-
-	if result.success:
-		print("[FirstLook] Survey submitted successfully.")
-	else:
-		printerr("[FirstLook] Survey submission failed: ", result.get("error", "unknown"))
-
-	survey_submitted.emit()
-	hide()
-
-func _on_dismiss_pressed() -> void:
-	survey_dismissed.emit()
-	hide()
+func _style_outline(btn: Button) -> void:
+	var s := _box(COLOR_PANEL, COLOR_BORDER, 1, 6)
+	s.set_content_margin_all(8)
+	for state in ["normal", "hover", "pressed", "hover_pressed"]:
+		btn.add_theme_stylebox_override(state, s)
+	btn.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	for c in ["font_color", "font_hover_color", "font_pressed_color", "font_focus_color"]:
+		btn.add_theme_color_override(c, COLOR_TEXT)

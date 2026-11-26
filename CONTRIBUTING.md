@@ -4,9 +4,9 @@ Thanks for wanting to help out. This is a community-made SDK, so contributions a
 
 ## What's most useful right now
 
-- **API endpoint corrections.** The endpoint paths are modeled on the Unity SDK docs. If you have a FirstLook account and find any discrepancies against the live Swagger UI at `https://api.firstlook.gg/client/swagger-ui/`, a PR with corrections would be huge.
+- **Real playtest reports.** The SDK follows FirstLook's published API spec at `https://api.firstlook.gg/client/docs` (the raw spec is at `/client/openapi.json`). A few details the spec does not spell out are listed under "Not yet confirmed" in the README. If you run a real playtest and see something off in your dashboard, an issue or PR is hugely helpful.
 - **Bug reports.** Open an issue with your Godot version, GodotSteam version, and what went wrong. Include the output log if you can.
-- **Survey UI improvements.** The `survey_screen.gd` builds everything in code. If you build something nicer (a proper `.tscn` with theming support, for example), feel free to PR it.
+- **Survey UI improvements.** `survey_screen.gd` builds everything in code. Theme support or controller navigation would be great additions.
 
 ## How to contribute
 
